@@ -6,6 +6,7 @@
 
 module Brig.Options where
 
+import Brig.Queue.Types (Queue (..))
 import Brig.SMTP (SMTPConnType (..))
 import Brig.Types
 import Brig.User.Auth.Cookie.Limit
@@ -49,9 +50,7 @@ data ElasticSearchOpts = ElasticSearchOpts
 instance FromJSON ElasticSearchOpts
 
 data AWSOpts = AWSOpts
-    { internalQueue    :: !Text
-    , userJournalQueue :: !(Maybe Text)
-    , blacklistTable   :: !Text
+    { userJournalQueue :: !(Maybe Text)
     , prekeyTable      :: !Text
     , sqsEndpoint      :: !AWSEndpoint
     , dynamoDBEndpoint :: !AWSEndpoint
@@ -74,6 +73,22 @@ data EmailSMTPOpts = EmailSMTPOpts
     } deriving (Show, Generic)
 
 instance FromJSON EmailSMTPOpts
+
+data StompOpts = StompOpts
+    { stompHost :: !Text
+    , stompPort :: !Int
+    , stompTls  :: !Bool
+    } deriving (Show, Generic)
+
+instance FromJSON StompOpts
+
+data InternalEventsOpts = InternalEventsOpts
+    { internalEventsQueue :: !Queue
+    } deriving (Show)
+
+instance FromJSON InternalEventsOpts where
+    parseJSON = Y.withObject "InternalEventsOpts" $ \o ->
+        InternalEventsOpts <$> parseJSON (Y.Object o)
 
 data EmailSMSGeneralOpts = EmailSMSGeneralOpts
     { templateDir :: !FilePath
@@ -159,6 +174,7 @@ data Opts = Opts
     , cassandra     :: !CassandraOpts
     , elasticsearch :: !ElasticSearchOpts
     , aws           :: !AWSOpts
+    , stomp         :: !(Maybe StompOpts)
 
     -- Email & SMS
     , emailSMS      :: !EmailSMSOpts
@@ -169,6 +185,7 @@ data Opts = Opts
     -- Misc.
     , discoUrl      :: !(Maybe Text)
     , geoDb         :: !(Maybe FilePath)
+    , internalEvents :: !InternalEventsOpts
 
     -- TURN
     , turn          :: !TurnOpts
@@ -183,6 +200,7 @@ data Settings = Settings
     , setTeamInvitationTimeout :: !Timeout
     , setTwilio                :: !FilePathSecrets
     , setNexmo                 :: !FilePathSecrets
+    , setStomp                 :: !(Maybe FilePathSecrets)
     , setWhitelist             :: !(Maybe Whitelist)
     , setUserMaxConnections    :: !Int64
     , setCookieDomain          :: !Text
@@ -191,7 +209,8 @@ data Settings = Settings
     , setUserCookieLimit       :: !Int
     , setUserCookieThrottle    :: !CookieThrottle
     , setDefaultLocale         :: !Locale
-    , setMaxConvAndTeamSize    :: !Word16 -- NOTE: This must be in sync with galley
+    , setMaxTeamSize           :: !Word16 -- NOTE: This must be in sync with galley
+    , setMaxConvSize           :: !Word16 -- NOTE: This must be in sync with galley
     , setProviderSearchFilter  :: !(Maybe ProviderId)
     -- ^ Temporary optional provider ID to use for filtering services during search
     } deriving (Show, Generic)
@@ -244,15 +263,9 @@ optsParser =
       showDefault <>
       help "The name of the ElasticSearch user index")) <*>
     (AWSOpts <$>
-     (textOption $
-      long "aws-internal-queue" <> metavar "STRING" <>
-      help "Event queue for internal brig generated events (e.g. user deletion)") <*>
      (optional $ textOption $
       long "aws-user-journal-queue" <> metavar "STRING" <>
       help "Event journal queue for user events (e.g. user deletion)") <*>
-     (textOption $
-      long "aws-dynamo-blacklist" <> metavar "STRING" <>
-      help "Dynamo table for storing blacklisted user keys") <*>
      (textOption $
       long "aws-dynamo-prekeys" <> metavar "STRING" <>
       help "Dynamo table for storing prekey data") <*>
@@ -262,6 +275,16 @@ optsParser =
      (option parseAWSEndpoint $
       long "aws-dynamodb-endpoint" <> value (AWSEndpoint "dynamodb.eu-west-1.amazonaws.com" True 443)
       <> metavar "STRING" <> showDefault <> help "aws DYNAMODB endpoint")) <*>
+    (optional $ StompOpts <$>
+     (textOption $
+      long "stomp-host" <> metavar "URL" <>
+      help "STOMP broker URL (e.g. for RabbitMQ or ActiveMQ)") <*>
+     (option auto $
+      long "stomp-port" <> metavar "INT" <>
+      help "STOMP broker port (usually 61613 or 61614)") <*>
+     (switch $
+      long "stomp-tls" <>
+      help "Connect to the STOMP broker via TLS")) <*>
     (EmailSMSOpts <$>
      emailOptsParser <*>
      (EmailSMSGeneralOpts <$>
@@ -339,6 +362,10 @@ optsParser =
     (optional discoUrlParser) <*>
     (optional $
      option auto $ long "geodb" <> metavar "FILE" <> help "GeoDB file path") <*>
+    (InternalEventsOpts <$>
+     (queueOption $
+      long "internal-events-queue" <> metavar "STRING" <>
+      help "Queue to use for internal events. Either 'stomp:...' or 'sqs:...'")) <*>
     (TurnOpts <$>
      (strOption $
       long "turn-servers" <> metavar "FILE" <>
@@ -404,6 +431,8 @@ settingsParser =
      long "twilio-credentials" <> metavar "FILE" <> help "File containing Twilio credentials" <> action "file")) <*>
     (FilePathSecrets <$> (strOption $
      long "nexmo-credentials" <> metavar "FILE" <> help "File containing Nexmo credentials" <> action "file")) <*>
+    (optional $ FilePathSecrets <$> (strOption $
+     long "stomp-credentials" <> metavar "FILE" <> help "File containing STOMP broker credentials" <> action "file")) <*>
     (optional $
      Whitelist <$>
      (textOption $
@@ -447,11 +476,25 @@ settingsParser =
      long "default-locale" <> metavar "STRING" <> value "en" <> showDefault <>
      help "Default locale to use (e.g. when selecting templates)") <*>
     (option auto $
-     long "conv-team-max-size" <> metavar "INT" <> value 128 <> showDefault <>
-     help "Max. # of members in a team/conversation.") <*>
+     long "team-max-size" <> metavar "INT" <>
+     help "Max. # of members in a team") <*>
+    (option auto $
+     long "conv-max-size" <> metavar "INT" <>
+     help "Max. # of members in a conversation") <*>
     (optional $ option providerIdOption $
      long "provider-id-search-filter" <> metavar "STRING" <>
      help "Filter _ONLY_ services with the given provider id")
+
+queueOption :: Mod OptionFields String -> Parser Queue
+queueOption =
+    fmap
+        (\s -> let (type_, name_) = break (== ':') s in
+               case type_ of
+                   "stomp" -> StompQueue (T.pack $ drop 1 name_)
+                   "sqs"   -> SqsQueue (T.pack $ drop 1 name_)
+                   _       -> error ("Unknown queue type: " <> show type_)
+        ) .
+    strOption
 
 localeOption :: Mod OptionFields String -> Parser Locale
 localeOption =

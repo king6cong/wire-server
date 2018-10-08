@@ -114,6 +114,7 @@ import System.Logger.Class (MonadLogger)
 import System.Logger.Message (msg, (+++), val)
 
 import qualified Data.Map.Strict      as Map
+import qualified Data.Set
 import qualified Data.UUID.Tagged     as U
 import qualified Galley.Data.Queries  as Cql
 import qualified Galley.Types.Clients as Clients
@@ -130,7 +131,7 @@ import qualified System.Logger.Class  as Log
 newtype ResultSet a = ResultSet { page :: Page a }
 
 schemaVersion :: Int32
-schemaVersion = 27
+schemaVersion = 28
 
 -- | Insert a conversation code
 insertCode :: MonadClient m => Code -> m ()
@@ -242,6 +243,7 @@ deleteTeam tid = do
     cc <- teamConversations tid
     for_ cc $ removeTeamConv tid . view conversationId
     retry x5 $ write Cql.deleteTeam (params Quorum (Deleted, tid))
+    -- TODO: delete service_whitelist records that mention this team
 
 addTeamMember :: MonadClient m => TeamId -> TeamMember -> m ()
 addTeamMember t m =
@@ -366,7 +368,7 @@ createConversation :: UserId
                    -> Maybe (Range 1 256 Text)
                    -> [Access]
                    -> AccessRole
-                   -> ConvAndTeamSizeChecked [UserId]
+                   -> ConvSizeChecked [UserId]
                    -> Maybe ConvTeamInfo
                    -> Maybe Milliseconds                  -- ^ Message timer
                    -> Galley Conversation
@@ -380,7 +382,7 @@ createConversation usr name acc role others tinfo mtimer = do
             setConsistency Quorum
             addPrepQuery Cql.insertConv (conv, RegularConv, usr, Set (toList acc), role, fromRange <$> name, Just (cnvTeamId ti), mtimer)
             addPrepQuery Cql.insertTeamConv (cnvTeamId ti, conv, cnvManaged ti)
-    mems <- snd <$> addMembersUnchecked now conv usr (list1 usr $ fromConvTeamSize others)
+    mems <- snd <$> addMembersUnchecked now conv usr (list1 usr $ fromConvSize others)
     return $ newConv conv RegularConv usr (toList mems) acc role name (cnvTeamId <$> tinfo) mtimer
 
 createSelfConversation :: MonadClient m => UserId -> Maybe (Range 1 256 Text) -> m Conversation
@@ -433,8 +435,8 @@ createOne2OneConversation a b name ti = do
 updateConversation :: MonadClient m => ConvId -> Range 1 256 Text -> m ()
 updateConversation cid name = retry x5 $ write Cql.updateConvName (params Quorum (fromRange name, cid))
 
-updateConversationAccess :: MonadClient m => ConvId -> [Access] -> AccessRole -> m ()
-updateConversationAccess cid acc role = retry x5 $ write Cql.updateConvAccess (params Quorum (Set acc, role, cid))
+updateConversationAccess :: MonadClient m => ConvId -> Data.Set.Set Access -> AccessRole -> m ()
+updateConversationAccess cid acc role = retry x5 $ write Cql.updateConvAccess (params Quorum (Set (toList acc), role, cid))
 
 updateConversationMessageTimer :: MonadClient m => ConvId -> Maybe Milliseconds -> m ()
 updateConversationMessageTimer cid mtimer = retry x5 $ write Cql.updateConvMessageTimer (params Quorum (mtimer, cid))
@@ -522,8 +524,8 @@ memberLists convs = do
         let f = (Just . maybe [mem] (mem :))
         in Map.alter f conv acc
 
-    mkMem (cnv, usr, srv, prv, st, omu, omur, oar, oarr, hid, hidr) =
-        (cnv, ) <$> toMember (usr, srv, prv, st, omu, omur, oar, oarr, hid, hidr)
+    mkMem (cnv, usr, srv, prv, st, omu, omus, omur, oar, oarr, hid, hidr) =
+        (cnv, ) <$> toMember (usr, srv, prv, st, omu, omus, omur, oar, oarr, hid, hidr)
 
 members :: MonadClient m => ConvId -> m [Member]
 members conv = join <$> memberLists [conv]
@@ -552,12 +554,15 @@ updateMember cid uid mup = do
         setConsistency Quorum
         for_ (mupOtrMute mup) $ \m ->
             addPrepQuery Cql.updateOtrMemberMuted (m, mupOtrMuteRef mup, cid, uid)
+        for_ (mupOtrMuteStatus mup) $ \ms ->
+            addPrepQuery Cql.updateOtrMemberMutedStatus (ms, mupOtrMuteRef mup, cid, uid)
         for_ (mupOtrArchive mup) $ \a ->
             addPrepQuery Cql.updateOtrMemberArchived (a, mupOtrArchiveRef mup, cid, uid)
         for_ (mupHidden mup) $ \h ->
             addPrepQuery Cql.updateMemberHidden (h, mupHiddenRef mup, cid, uid)
     return MemberUpdateData
         { misOtrMuted = mupOtrMute mup
+        , misOtrMutedStatus = mupOtrMuteStatus mup
         , misOtrMutedRef = mupOtrMuteRef mup
         , misOtrArchived = mupOtrArchive mup
         , misOtrArchivedRef = mupOtrArchiveRef mup
@@ -588,6 +593,7 @@ newMember u = Member
     { memId             = u
     , memService        = Nothing
     , memOtrMuted       = False
+    , memOtrMutedStatus = Nothing
     , memOtrMutedRef    = Nothing
     , memOtrArchived    = False
     , memOtrArchivedRef = Nothing
@@ -596,17 +602,18 @@ newMember u = Member
     }
 
 toMember :: ( UserId, Maybe ServiceId, Maybe ProviderId, Maybe Cql.MemberStatus
-            , Maybe Bool, Maybe Text -- otr muted
-            , Maybe Bool, Maybe Text -- otr archived
-            , Maybe Bool, Maybe Text -- hidden
+            , Maybe Bool, Maybe MutedStatus, Maybe Text -- otr muted
+            , Maybe Bool, Maybe Text                    -- otr archived
+            , Maybe Bool, Maybe Text                    -- hidden
             ) -> Maybe Member
-toMember (usr, srv, prv, sta, omu, omur, oar, oarr, hid, hidr) =
+toMember (usr, srv, prv, sta, omu, omus, omur, oar, oarr, hid, hidr) =
     if sta /= Just 0
         then Nothing
         else Just $ Member
             { memId             = usr
             , memService        = newServiceRef <$> srv <*> prv
             , memOtrMuted       = fromMaybe False omu
+            , memOtrMutedStatus = omus
             , memOtrMutedRef    = omur
             , memOtrArchived    = fromMaybe False oar
             , memOtrArchivedRef = oarr
@@ -622,7 +629,7 @@ updateClient add usr cls = do
     retry x5 $ write (q cls) (params Quorum (Identity usr))
 
 -- Do, at most, 16 parallel lookups of up to 128 users each
-lookupClients :: (MonadClient m, MonadBaseControl IO m, Forall (Pure m)) 
+lookupClients :: (MonadClient m, MonadBaseControl IO m, Forall (Pure m))
               => [UserId] -> m Clients
 lookupClients users = Clients.fromList . concat . concat <$>
     forM (chunksOf 2048 users) (mapConcurrently getClients . chunksOf 128)

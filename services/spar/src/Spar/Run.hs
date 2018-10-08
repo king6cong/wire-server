@@ -19,14 +19,14 @@ module Spar.Run (initCassandra, mkLogger, runServer) where
 
 import Bilge
 import Cassandra as Cas
-import Data.Int
 import Data.List.NonEmpty as NE
 import Data.Metrics (metrics)
 import Data.String.Conversions
 import Data.String (fromString)
 import Lens.Micro
-import Network.HTTP.Client (responseTimeoutMicro)
-import Spar.API
+import Network.Wai (Application)
+import Network.Wai.Utilities.Request (lookupRequestId)
+import Spar.API (app)
 import Spar.API.Instances ()
 import Spar.API.Swagger ()
 import Spar.App
@@ -42,6 +42,7 @@ import qualified Cassandra.Settings as Cas
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wai.Utilities.Server as WU
 import qualified SAML2.WebSSO as SAML
+import qualified Spar.Data as Data
 import qualified Spar.Options as Opts
 import qualified System.Logger as Log
 
@@ -49,13 +50,11 @@ import qualified System.Logger as Log
 ----------------------------------------------------------------------
 -- cassandra
 
-schemaVersion :: Int32
-schemaVersion = 0
-
 initCassandra :: Opts.Opts -> Logger -> IO ClientState
 initCassandra opts lgr = do
-    connectString <- maybe (return $ NE.fromList [cs $ Opts.cassandra opts ^. casEndpoint . epHost])
-               (Cas.initialContacts "cassandra_spar")
+    connectString <- maybe
+               (Cas.initialContactsDNS (Opts.cassandra opts ^. casEndpoint . epHost))
+               (Cas.initialContactsDisco "cassandra_spar")
                (cs <$> Opts.discoUrl opts)
     cas <- Cas.init (Log.clone (Just "cassandra.spar") lgr) $ Cas.defSettings
       & Cas.setContacts (NE.head connectString) (NE.tail connectString)
@@ -67,7 +66,7 @@ initCassandra opts lgr = do
       & Cas.setSendTimeout 3
       & Cas.setResponseTimeout 10
       & Cas.setProtocolVersion V3
-    runClient cas $ Cas.versionCheck schemaVersion
+    runClient cas $ Cas.versionCheck Data.schemaVersion
     pure cas
 
 
@@ -94,8 +93,6 @@ runServer sparCtxOpts = do
         & Warp.setHost (fromString $ sparCtxOpts ^. to saml . SAML.cfgSPHost)
         . Warp.setPort (sparCtxOpts ^. to saml . SAML.cfgSPPort)
   sparCtxHttpManager <- newManager defaultManagerSettings
-      { managerResponseTimeout = responseTimeoutMicro (10 * 1000 * 1000)
-      }
   let sparCtxHttpBrig = Bilge.host (sparCtxOpts ^. to brig . epHost . to cs)
                       . Bilge.port (sparCtxOpts ^. to brig . epPort)
                       $ Bilge.empty
@@ -105,5 +102,11 @@ runServer sparCtxOpts = do
         -- prometheus-compatible.  not sure about the order in which to do these.
         = WU.catchErrors sparCtxLogger mx
         . SAML.setHttpCachePolicy
-        $ app Env {..}
+        . lookupRequestIdMiddleware
+        $ \sparCtxRequestId -> app Env {..}
   WU.runSettingsWithShutdown settings wrappedApp 5
+
+lookupRequestIdMiddleware :: (RequestId -> Application) -> Application
+lookupRequestIdMiddleware mkapp req cont = do
+  let reqid = maybe mempty RequestId $ lookupRequestId req
+  mkapp reqid req cont

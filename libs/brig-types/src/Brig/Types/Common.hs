@@ -263,7 +263,7 @@ instance ToJSON Asset where
 -----------------------------------------------------------------------------
 -- Language
 
-newtype Language = Language { fromLanguage :: ISO639_1 } deriving (Ord, Eq)
+newtype Language = Language { fromLanguage :: ISO639_1 } deriving (Ord, Eq, Show)
 
 languageParser :: Parser Language
 languageParser = codeParser "language" $ fmap Language . checkAndConvert isLower
@@ -277,7 +277,7 @@ parseLanguage = hush . parseOnly languageParser
 -----------------------------------------------------------------------------
 -- Country
 
-newtype Country = Country { fromCountry :: CountryCode } deriving (Ord, Eq)
+newtype Country = Country { fromCountry :: CountryCode } deriving (Ord, Eq, Show)
 
 countryParser :: Parser Country
 countryParser = codeParser "country" $ fmap Country . checkAndConvert isUpper

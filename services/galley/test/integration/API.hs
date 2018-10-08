@@ -585,7 +585,7 @@ postConvFailNotConnected g b _ _ = do
 
 postConvFailNumMembers :: Galley -> Brig -> Cannon -> TestSetup -> Http ()
 postConvFailNumMembers g b _ s = do
-    let n = fromIntegral (maxConvTeamSize s)
+    let n = fromIntegral (maxConvSize s)
     alice <- randomUser b
     bob:others <- replicateM n (randomUser b)
     connectUsers b alice (list1 bob others)
@@ -891,7 +891,7 @@ postMembersFail g b _ _ = do
 
 postTooManyMembersFail :: Galley -> Brig -> Cannon -> TestSetup -> Http ()
 postTooManyMembersFail g b _ s = do
-    let n = fromIntegral (maxConvTeamSize s)
+    let n = fromIntegral (maxConvSize s)
     alice <- randomUser b
     bob   <- randomUser b
     chuck <- randomUser b
@@ -955,7 +955,7 @@ putConvRenameOk g b c _ = do
 
 putMemberOtrMuteOk :: Galley -> Brig -> Cannon -> TestSetup -> Http ()
 putMemberOtrMuteOk g b c _ = do
-    putMemberOk (memberUpdate { mupOtrMute = Just True, mupOtrMuteRef = Just "ref" }) g b c
+    putMemberOk (memberUpdate { mupOtrMute = Just True, mupOtrMuteStatus = Just 0, mupOtrMuteRef = Just "ref" }) g b c
     putMemberOk (memberUpdate { mupOtrMute = Just False }) g b c
 
 putMemberOtrArchiveOk :: Galley -> Brig -> Cannon -> TestSetup -> Http ()
@@ -972,6 +972,7 @@ putMemberAllOk :: Galley -> Brig -> Cannon -> TestSetup -> Http ()
 putMemberAllOk g b c _ = putMemberOk
     (memberUpdate
         { mupOtrMute = Just True
+        , mupOtrMuteStatus = Just 0
         , mupOtrMuteRef = Just "mref"
         , mupOtrArchive = Just True
         , mupOtrArchiveRef = Just "aref"
@@ -992,6 +993,7 @@ putMemberOk update g b ca = do
                   { memId = bob
                   , memService = Nothing
                   , memOtrMuted = fromMaybe False (mupOtrMute update)
+                  , memOtrMutedStatus = mupOtrMuteStatus update
                   , memOtrMutedRef = mupOtrMuteRef update
                   , memOtrArchived = fromMaybe False (mupOtrArchive update)
                   , memOtrArchivedRef = mupOtrArchiveRef update

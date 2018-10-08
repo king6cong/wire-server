@@ -144,8 +144,8 @@ createEnv m o = do
 
 initCassandra :: Opts -> Logger -> IO ClientState
 initCassandra o l = do
-    c <- maybe (return $ NE.fromList [unpack $ o^.optCassandra.casEndpoint.epHost])
-               (C.initialContacts "cassandra_galley")
+    c <- maybe (C.initialContactsDNS (o^.optCassandra.casEndpoint.epHost))
+               (C.initialContactsDisco "cassandra_galley")
                (unpack <$> o^.optDiscoUrl)
     C.init (Logger.clone (Just "cassandra.galley") l) $
               C.setContacts (NE.head c) (NE.tail c)
@@ -174,6 +174,7 @@ initHttpManager o = do
         , managerIdleConnectionCount = 3 * (o^.optSettings.setHttpPoolSize)
         }
 
+-- TODO: somewhat duplicates Brig.App.initExtGetManager
 initExtEnv :: IO ExtEnv
 initExtEnv = do
     ctx <- Ssl.context

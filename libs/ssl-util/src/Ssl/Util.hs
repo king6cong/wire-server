@@ -21,6 +21,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Builder
 import Data.Dynamic (fromDynamic)
 import Data.Time.Clock (getCurrentTime)
+import Network.HTTP.Client (defaultRequest)
 import Network.HTTP.Client.Internal
 import OpenSSL.BN (integerToMPI)
 import OpenSSL.EVP.Digest (Digest, digestLBS)
@@ -171,14 +172,12 @@ verifyRsaFingerprint d = verifyFingerprint $ \pk ->
 withVerifiedSslConnection
     :: (SSL -> IO ())       -- ^ A function to verify fingerprints given an SSL connection
     -> Manager
-    -> Request              -- ^ Request (needed to open a new connection if
-                            -- there isn't one available yet). Take care to
-                            -- use the request passed to the callback
-                            -- instead of the one passed to
-                            -- 'withVerifiedSslConnection'
-    -> (Request -> IO a)
+    -> (Request -> Request) -- ^ Request builder
+    -> (Request -> IO a)    -- ^ This callback will be passed a modified
+                            --   request that always uses the verified
+                            --   connection
     -> IO a
-withVerifiedSslConnection verify man req act =
+withVerifiedSslConnection verify man reqBuilder act =
     withConnection' req man Reuse $ \mConn -> do
         -- If we see this connection for the first time, verify fingerprints
         let conn = managedResource mConn
@@ -189,3 +188,5 @@ withVerifiedSslConnection verify man req act =
         -- Make a request using this connection and return it back to the
         -- pool (that's what 'Reuse' is for)
         act req{connectionOverride = Just mConn}
+  where
+    req = reqBuilder defaultRequest

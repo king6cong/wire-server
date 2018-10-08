@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE QuasiQuotes         #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -10,7 +11,6 @@
 module Test.Spar.DataSpec where
 
 import Bilge
-import Cassandra as Cas
 import Control.Concurrent
 import Control.Exception
 import Control.Monad.Catch
@@ -23,39 +23,45 @@ import Data.Time
 import Data.UUID as UUID
 import Data.UUID.V4 as UUID
 import Lens.Micro
+import SAML2.Util ((-/))
 import Spar.API
 import Spar.API.Instances ()
 import Spar.API.Test (IntegrationTests)
 import Spar.Data as Data
 import Spar.Options as Options
-import Spar.Types
 import URI.ByteString as URI
 import URI.ByteString.QQ (uri)
 import Util
 import Util.Options
 import Web.Cookie
 
+import qualified Cassandra as Cas
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.List as List
 import qualified SAML2.WebSSO as SAML
+import qualified SAML2.WebSSO.Test.Credentials as SAML
+import qualified SAML2.WebSSO.Test.MockResponse as SAML
 import qualified Servant
 import qualified Servant.Client as Servant
 import qualified Text.XML as XML
-import qualified Text.XML.Util as SAML
 
 
 spec :: SpecWith TestEnv
 spec = do
   describe "TTL" $ do
     it "works in seconds" $ do
+      -- NB: this test calls C* directly.  no deeper reason for that, it just seemed more convenient
+      -- at the time, and @fisx is of the opinion that integration tests do not have to limit
+      -- themselves to particular ways of trying to break the testee.
+
       env <- ask
-      (_, _, idpid) <- createTestIdP
+      let idpid = env ^. teIdP . SAML.idpId
       (_, req) <- call $ callAuthnReq (env ^. teSpar) idpid
 
       let probe :: IO Bool
           probe = do
             denv :: Data.Env <- Data.mkEnv (env ^. teOpts) <$> getCurrentTime
-            runClient (env ^. teCql) (checkAgainstRequest (req ^. SAML.rqID) `runReaderT` denv)
+            Cas.runClient (env ^. teCql) (checkAgainstRequest (req ^. SAML.rqID) `runReaderT` denv)
 
           maxttl :: Int  -- musec
           maxttl = (fromIntegral . fromTTL $ env ^. teOpts . to maxttlAuthreq) * 1000 * 1000
@@ -63,10 +69,10 @@ spec = do
       liftIO $ do
         maxttl `shouldSatisfy` (< 60 * 1000 * 1000)  -- otherwise the test will be really slow.
         probe `shouldReturn` True
-        threadDelay ((maxttl `div` 10) * 8)
-        probe `shouldReturn` True
-        threadDelay  ((maxttl `div` 10) * 4)
-        probe `shouldReturn` False
+        threadDelay (maxttl `div` 2)
+        probe `shouldReturn` True  -- 0.5 lifetimes after birth
+        threadDelay  maxttl
+        probe `shouldReturn` False  -- 1.5 lifetimes after birth
 
 
   describe "cql binding" $ do
@@ -187,7 +193,7 @@ spec = do
 
         context "denied" $ do
           it "responds with status 200 and a valid html page with constant expected title." $ do
-            (_, outcome, _, _) <- prepareAccessVerdictCore False mkAuthnReqWeb
+            (_, outcome, _, _) <- requestAccessVerdict False mkAuthnReqWeb
             liftIO $ do
               Servant.errHTTPCode outcome `shouldBe` 200
               Servant.errReasonPhrase outcome `shouldBe` "forbidden"
@@ -198,7 +204,7 @@ spec = do
 
         context "granted" $ do
           it "responds with status 200 and a valid html page with constant expected title." $ do
-            (_, outcome, _, _) <- prepareAccessVerdictCore True mkAuthnReqWeb
+            (_, outcome, _, _) <- requestAccessVerdict True mkAuthnReqWeb
             liftIO $ do
               Servant.errHTTPCode outcome `shouldBe` 200
               Servant.errReasonPhrase outcome `shouldBe` "success"
@@ -216,11 +222,11 @@ spec = do
 
         context "denied" $ do
           it "responds with status 303 with appropriate details." $ do
-            (_uid, outcome, loc, qry) <- prepareAccessVerdictCore False mkAuthnReqMobile
+            (_uid, outcome, loc, qry) <- requestAccessVerdict False mkAuthnReqMobile
             liftIO $ do
               Servant.errHTTPCode outcome `shouldBe` 303
               Servant.errReasonPhrase outcome `shouldBe` "forbidden"
-              Servant.errBody outcome `shouldBe` mempty
+              Servant.errBody outcome `shouldBe` "[\"we don't like you\",\"seriously\"]"
               uriScheme loc `shouldBe` (URI.Scheme "wire")
               List.lookup "userid" qry `shouldBe` Nothing
               List.lookup "cookie" qry `shouldBe` Nothing
@@ -228,7 +234,7 @@ spec = do
 
         context "granted" $ do
           it "responds with status 303 with appropriate details." $ do
-            (uid, outcome, loc, qry) <- prepareAccessVerdictCore True mkAuthnReqMobile
+            (uid, outcome, loc, qry) <- requestAccessVerdict True mkAuthnReqMobile
             liftIO $ do
               Servant.errHTTPCode outcome `shouldBe` 303
               Servant.errReasonPhrase outcome `shouldBe` "success"
@@ -277,7 +283,6 @@ clientGetAuthnRequest :: Maybe URI -> Maybe URI -> SAML.IdPId -> Servant.ClientM
 clientGetAuthnRequest = Servant.client (Servant.Proxy @APIAuthReq)
 
 
-
 runInsertUser :: TestEnv -> SAML.UserRef -> UserId -> Http ()
 runInsertUser env uref = runServantClient env . clientPostUser uref
 
@@ -301,33 +306,34 @@ mkAuthnReqWeb idpid = do
   env <- ask
   -- TODO: the following fails, i think there is something wrong with query encoding.
   -- runServantClient env $ clientGetAuthnRequest Nothing Nothing idpid
-  call $ get ((env ^. teSpar) . path ("/sso/initiate-login/" <> cs (SAML.idPIdToST idpid)) . expect2xx)
-
+  call $ get ((env ^. teSpar) . path (cs $ "/sso/initiate-login/" -/ SAML.idPIdToST idpid) . expect2xx)
 
 mkAuthnReqMobile :: SAML.IdPId -> ReaderT TestEnv IO ResponseLBS
 mkAuthnReqMobile idpid = do
   env <- ask
   -- (see the TODO under "web" above)
   -- call . runServantClient env $ clientGetAuthnRequest (Just succurl) (Just errurl) idpid
-  let succurl = [uri|wire://login-granted/?cookie=$cookie&userid=$userid|]
-      errurl = [uri|wire://login-denied/?label=$label|]
-      mk = Builder.toLazyByteString . urlEncode [] . serializeURIRef'
-      arQueries = "success_redirect=" <> mk succurl <> "&error_redirect=" <> mk errurl
-      arPath = cs $ "/sso/initiate-login/" <> cs (SAML.idPIdToST idpid) <> "?" <> arQueries
+  let succurl   = [uri|wire://login-granted/?cookie=$cookie&userid=$userid|]
+      errurl    = [uri|wire://login-denied/?label=$label|]
+      mk        = Builder.toLazyByteString . urlEncode [] . serializeURIRef'
+      arQueries = cs $ "success_redirect=" <> mk succurl <> "&error_redirect=" <> mk errurl
+      arPath    = cs $ "/sso/initiate-login/" -/ SAML.idPIdToST idpid <> "?" <> arQueries
   call $ get ((env ^. teSpar) . path arPath . expect2xx)
 
-prepareAccessVerdictCore :: HasCallStack
-                         => Bool                                             -- is the verdict granted?
-                         -> (SAML.IdPId -> ReaderT TestEnv IO ResponseLBS)   -- raw authnreq
-                         -> ReaderT TestEnv IO ( UserId
-                                               , SAML.ResponseVerdict
-                                               , URI                         -- location header
-                                               , [(SBS, SBS)]                -- query params
-                                               )
-prepareAccessVerdictCore isGranted mkAuthnReq = do
-  (uid, _, idpid) <- createTestIdP
+requestAccessVerdict :: HasCallStack
+                     => Bool                                             -- ^ is the verdict granted?
+                     -> (SAML.IdPId -> ReaderT TestEnv IO ResponseLBS)   -- ^ raw authnreq
+                     -> ReaderT TestEnv IO ( UserId
+                                           , SAML.ResponseVerdict
+                                           , URI                         -- ^ location header
+                                           , [(SBS, SBS)]                -- ^ query params
+                                           )
+requestAccessVerdict isGranted mkAuthnReq = do
   env <- ask
-  let tenant  = sampleIdP ^. nidpIssuer
+  let uid     = env ^. teUserId
+      idp     = env ^. teIdP
+      idpid   = idp ^. SAML.idpId
+      tenant  = idp ^. SAML.idpMetadata . SAML.edIssuer
       subject = SAML.opaqueNameID "blee"
       uref    = SAML.UserRef tenant subject
   call $ runInsertUser env uref uid
@@ -335,8 +341,9 @@ prepareAccessVerdictCore isGranted mkAuthnReq = do
     raw <- mkAuthnReq idpid
     bdy <- maybe (error "authreq") pure $ responseBody raw
     either (error . show) pure $ Servant.mimeUnrender (Servant.Proxy @SAML.HTML) bdy
-  let authnresp = fleshOutResponse emptyAuthnResponse authnreq
-      verdict = if isGranted
+  spmeta <- getTestSPMetadata idpid
+  authnresp <- liftIO $ mkAuthnResponse idp spmeta authnreq
+  let verdict = if isGranted
         then SAML.AccessGranted uref
         else SAML.AccessDenied ["we don't like you", "seriously"]
   outcome <- call $ runPostVerdict env (authnresp, verdict)
@@ -349,18 +356,7 @@ prepareAccessVerdictCore isGranted mkAuthnReq = do
   pure (uid, outcome, loc, qry)
 
 
-emptyAuthnResponse :: SAML.AuthnResponse
-emptyAuthnResponse = SAML.Response
-  { SAML._rspID           = SAML.ID "bleep"
-  , SAML._rspInRespTo     = Nothing
-  , SAML._rspVersion      = SAML.Version_2_0
-  , SAML._rspIssueInstant = SAML.unsafeReadTime "2018-04-13T06:33:02.772Z"
-  , SAML._rspDestination  = Nothing
-  , SAML._rspIssuer       = Nothing
-  , SAML._rspStatus       = SAML.StatusSuccess
-  , SAML._rspPayload      = []
-  }
-
--- | See 'verdictHandler' on the question of why we don't need an 'Assertion' in the payload here.
-fleshOutResponse :: SAML.AuthnResponse -> SAML.FormRedirect SAML.AuthnRequest -> SAML.AuthnResponse
-fleshOutResponse resp (SAML.FormRedirect _ req) = resp & SAML.rspInRespTo .~ Just (req ^. SAML.rqID)
+mkAuthnResponse :: SAML.IdPConfig extra -> SAML.SPMetadata -> SAML.FormRedirect SAML.AuthnRequest -> IO SAML.AuthnResponse
+mkAuthnResponse idp spmeta (SAML.FormRedirect _ req) = do
+  SAML.SignedAuthnResponse (XML.Document _ el _) <- liftIO $ SAML.mkAuthnResponse SAML.sampleIdPPrivkey idp spmeta req True
+  either (throwIO . ErrorCall . show) pure $ SAML.parse [XML.NodeElement el]

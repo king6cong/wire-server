@@ -13,8 +13,9 @@ import Brig.API.Handler
 import Brig.API.User (fetchUserIdentity)
 import Brig.Data.UserKey (userEmailKey)
 import Brig.Email
-import Brig.Options (setMaxConvAndTeamSize, setTeamInvitationTimeout)
+import Brig.Options (setMaxTeamSize, setTeamInvitationTimeout)
 import Brig.Team.Email
+import Brig.Team.Util (ensurePermissions)
 import Brig.Types.Team.Invitation
 import Brig.Types.User (InvitationCode, emailIdentity)
 import Brig.Types.Intra (AccountStatus (..))
@@ -37,7 +38,7 @@ import Network.Wai.Utilities.Swagger (document)
 import Prelude
 
 import qualified Brig.API.User                 as API
-import qualified Brig.Blacklist                as Blacklist
+import qualified Brig.Data.Blacklist           as Blacklist
 import qualified Brig.Data.UserKey             as Data
 import qualified Brig.Team.DB                  as DB
 import qualified Brig.Types.Swagger            as Doc
@@ -54,7 +55,6 @@ routes = do
     post "/teams/:tid/invitations" (continue createInvitation) $
         accept "application" "json"
         .&. header "Z-User"
-        .&. header "Z-Connection"
         .&. capture "tid"
         .&. request
 
@@ -165,8 +165,8 @@ getInvitationCode (_ ::: t ::: r) = do
   where
     found c = json $ object [ "code" .= c ]
 
-createInvitation :: JSON ::: UserId ::: ConnId ::: TeamId ::: Request -> Handler Response
-createInvitation (_ ::: uid ::: _ ::: tid ::: req) = do
+createInvitation :: JSON ::: UserId ::: TeamId ::: Request -> Handler Response
+createInvitation (_ ::: uid ::: tid ::: req) = do
     body <- parseJsonBody req
     idt  <- maybe (throwStd noIdentity) return =<< lift (fetchUserIdentity uid)
     from <- maybe (throwStd noEmail)    return (emailIdentity idt)
@@ -176,7 +176,7 @@ createInvitation (_ ::: uid ::: _ ::: tid ::: req) = do
     blacklisted <- lift $ Blacklist.exists uk
     when blacklisted $
         throwStd blacklistedEmail
-    maxSize <- setMaxConvAndTeamSize <$> view settings
+    maxSize <- setMaxTeamSize <$> view settings
     pending <- lift $ DB.countInvitations tid
     when (fromIntegral pending >= maxSize) $
         throwStd tooManyTeamInvitations
@@ -223,7 +223,7 @@ getInvitationByCode (_ ::: c) = do
 suspendTeam :: JSON ::: TeamId -> Handler Response
 suspendTeam (_ ::: tid) = do
     changeTeamAccountStatuses tid Suspended
-    DB.deleteInvitations tid
+    lift $ DB.deleteInvitations tid
     lift $ Intra.changeTeamStatus tid Team.Suspended Nothing
     return empty
 
@@ -246,13 +246,3 @@ changeTeamAccountStatuses tid s = do
   where
     toList1 (x:xs) = return $ List1.list1 x xs
     toList1 []     = throwStd (notFound "Team not found or no members")
-
-ensurePermissions :: UserId -> TeamId -> [Team.Perm] -> Handler ()
-ensurePermissions u t perms = do
-    m <- lift $ Intra.getTeamMember u t
-    unless (check m) $
-        throwStd insufficientTeamPermissions
-  where
-    check :: Maybe Team.TeamMember -> Bool
-    check (Just m) = and $ Team.hasPermission m <$> perms
-    check Nothing  = False

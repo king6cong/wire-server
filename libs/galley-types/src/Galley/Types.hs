@@ -46,6 +46,7 @@ module Galley.Types
     , NewConvManaged            (..)
     , NewConvUnmanaged          (..)
     , MemberUpdate              (..)
+    , MutedStatus               (..)
     , TypingStatus              (..)
     , UserClientMap             (..)
     , UserClients               (..)
@@ -65,6 +66,7 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time
 import Data.Id
+import Data.Int
 import Data.Json.Util
 import Data.List1
 import Data.UUID (toASCIIBytes)
@@ -103,23 +105,25 @@ data ConvType
     | ConnectConv
     deriving (Eq, Show)
 
--- Access define how users can join conversations
+-- | Access define how users can join conversations
 data Access
-    = PrivateAccess -- Made obsolete by PrivateAccessRole
-    | InviteAccess  -- User A can add User B
-    | LinkAccess    -- User can join knowing conversation id
-    | CodeAccess    -- User can join knowing [changeable/revokable] code
+    = PrivateAccess  -- ^ Made obsolete by PrivateAccessRole
+    | InviteAccess   -- ^ User A can add User B
+    | LinkAccess     -- ^ User can join knowing conversation id
+    | CodeAccess     -- ^ User can join knowing [changeable/revokable] code
     deriving (Eq, Ord, Show)
 
--- AccessRoles define who can join conversations
--- the roles are "supersets", i.e. Activated includes Team
--- and NonActivated includes Activated
+-- | AccessRoles define who can join conversations. The roles are
+-- "supersets", i.e. Activated includes Team and NonActivated includes
+-- Activated.
 data AccessRole
-    = PrivateAccessRole
-    | TeamAccessRole
-    | ActivatedAccessRole    -- has activated email or phone
-    | NonActivatedAccessRole -- has nothing
-    deriving (Eq, Show)
+    = PrivateAccessRole      -- ^ Nobody can be invited to this conversation
+                             --   (e.g. it's a 1:1 conversation)
+    | TeamAccessRole         -- ^ Team-only conversation
+    | ActivatedAccessRole    -- ^ Conversation for users who have activated
+                             --   email or phone
+    | NonActivatedAccessRole -- ^ No checks
+    deriving (Eq, Ord, Show)
 
 data ConvMembers = ConvMembers
     { cmSelf   :: !Member
@@ -285,10 +289,16 @@ newtype Accept = Accept
 
 -- Members ------------------------------------------------------------------
 
+-- The semantics of the possible different values is entirely up to clients,
+-- the server will not interpret this value in any way.
+newtype MutedStatus = MutedStatus { fromMutedStatus :: Int32 }
+    deriving (Eq, Num, Ord, Show, FromJSON, ToJSON)
+
 data Member = Member
     { memId             :: !UserId
     , memService        :: !(Maybe ServiceRef)
-    , memOtrMuted       :: !Bool
+    , memOtrMuted       :: !Bool -- ^ DEPRECATED, remove it once enough clients use `memOtrMutedStatus`
+    , memOtrMutedStatus :: !(Maybe MutedStatus)
     , memOtrMutedRef    :: !(Maybe Text)
     , memOtrArchived    :: !Bool
     , memOtrArchivedRef :: !(Maybe Text)
@@ -304,8 +314,11 @@ data OtherMember = OtherMember
 instance Ord OtherMember where
     compare a b = compare (omId a) (omId b)
 
+-- Inbound member updates.  This is what galley expects on its endpoint.  See also
+-- 'MemberUpdateData'.
 data MemberUpdate = MemberUpdate
     { mupOtrMute       :: !(Maybe Bool)
+    , mupOtrMuteStatus :: !(Maybe MutedStatus)
     , mupOtrMuteRef    :: !(Maybe Text)
     , mupOtrArchive    :: !(Maybe Bool)
     , mupOtrArchiveRef :: !(Maybe Text)
@@ -380,8 +393,11 @@ data Connect = Connect
     , cEmail     :: !(Maybe Text)
     } deriving (Eq, Show)
 
+-- Outbound member updates.  Used for events (sent over the websocket, etc.).  See also
+-- 'MemberUpdate'.
 data MemberUpdateData = MemberUpdateData
     { misOtrMuted       :: !(Maybe Bool)
+    , misOtrMutedStatus :: !(Maybe MutedStatus)
     , misOtrMutedRef    :: !(Maybe Text)
     , misOtrArchived    :: !(Maybe Bool)
     , misOtrArchivedRef :: !(Maybe Text)
@@ -796,6 +812,7 @@ instance ToJSON ConversationRename where
 instance FromJSON MemberUpdate where
     parseJSON = withObject "member-update object" $ \m -> do
         u <- MemberUpdate <$> m .:? "otr_muted"
+                          <*> m .:? "otr_muted_status"
                           <*> m .:? "otr_muted_ref"
                           <*> m .:? "otr_archived"
                           <*> m .:? "otr_archived_ref"
@@ -803,6 +820,7 @@ instance FromJSON MemberUpdate where
                           <*> m .:? "hidden_ref"
 
         unless (isJust (mupOtrMute u)
+            || isJust (mupOtrMuteStatus u)
             || isJust (mupOtrMuteRef u)
             || isJust (mupOtrArchive u)
             || isJust (mupOtrArchiveRef u)
@@ -826,6 +844,7 @@ instance ToJSON MemberUpdate where
 instance FromJSON MemberUpdateData where
     parseJSON = withObject "member-update event data" $ \m ->
         MemberUpdateData <$> m .:? "otr_muted"
+                         <*> m .:? "otr_muted_status"
                          <*> m .:? "otr_muted_ref"
                          <*> m .:? "otr_archived"
                          <*> m .:? "otr_archived_ref"
@@ -835,6 +854,7 @@ instance FromJSON MemberUpdateData where
 instance ToJSON MemberUpdateData where
     toJSON m = object
         $ "otr_muted"        .= misOtrMuted m
+        # "otr_muted_status" .= misOtrMutedStatus m
         # "otr_muted_ref"    .= misOtrMutedRef m
         # "otr_archived"     .= misOtrArchived m
         # "otr_archived_ref" .= misOtrArchivedRef m
@@ -854,6 +874,7 @@ instance ToJSON Member where
 -- ... until here
 
         , "otr_muted"        .= memOtrMuted m
+        , "otr_muted_status" .= memOtrMutedStatus m
         , "otr_muted_ref"    .= memOtrMutedRef m
         , "otr_archived"     .= memOtrArchived m
         , "otr_archived_ref" .= memOtrArchivedRef m
@@ -866,6 +887,7 @@ instance FromJSON Member where
         Member <$> o .:  "id"
                <*> o .:? "service"
                <*> o .:? "otr_muted"        .!= False
+               <*> o .:? "otr_muted_status"
                <*> o .:? "otr_muted_ref"
                <*> o .:? "otr_archived"     .!= False
                <*> o .:? "otr_archived_ref"

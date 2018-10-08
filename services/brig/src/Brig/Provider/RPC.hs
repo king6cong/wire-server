@@ -40,6 +40,7 @@ import Data.Word
 import Galley.Types (Event)
 import Network.HTTP.Types.Method
 import Ssl.Util (withVerifiedSslConnection)
+import Network.HTTP.Types.Status
 import System.Logger.Class (MonadLogger, msg, val, field ,(~~))
 import URI.ByteString
 
@@ -65,17 +66,17 @@ createBot scon new = do
     (man, verifyFingerprints) <- view extGetManager
     extHandleAll onExc $ do
         rs <- lift $ recovering x3 httpHandlers $ const $ liftIO $
-            withVerifiedSslConnection (verifyFingerprints fprs) man req $ \req' ->
-                Http.httpLbs req' man
+            withVerifiedSslConnection (verifyFingerprints fprs) man reqBuilder $ \req ->
+                Http.httpLbs req man
         case Bilge.statusCode rs of
             201 -> decodeBytes "External" (responseBody rs)
             409 -> throwE ServiceBotConflict
             _   -> extLogError scon rs >> throwE ServiceUnavailable
   where
-    req = extReq scon ["bots"]
+    reqBuilder
+        = extReq scon ["bots"]
         . method POST
         . Bilge.json new
-        $ empty
 
     onExc ex = extLogError scon ex >> throwE ServiceUnavailable
 
@@ -200,7 +201,7 @@ removeBotMember zusr zcon conv bot = do
               . field "bot"      (toByteString bot)
               . msg (val "Removing bot member")
     rs <- galleyRequest DELETE req
-    if isJust (responseBody rs)
+    if isJust (responseBody rs) && Bilge.statusCode rs == 200
         then Just <$> decodeBody "galley" rs
         else return Nothing
   where
@@ -209,4 +210,4 @@ removeBotMember zusr zcon conv bot = do
         . maybe id (header "Z-Connection" . toByteString') zcon
         . contentJson
         . lbytes (encode (Galley.removeBot conv bot))
-        . expect2xx
+        . expect [status200, status404] -- 404 is allowed: a given conversation may no longer exist

@@ -1,3 +1,4 @@
+LANG := en_US.UTF-8
 SHELL         := /usr/bin/env bash
 NAME          := spar
 VERSION       ?=
@@ -96,7 +97,8 @@ db-migrate: fast
 docker:
 	$(foreach executable,$(EXECUTABLES),\
 	docker build -t $(executable) \
-	-f Dockerfile \
+	-f ../../build/alpine/Dockerfile \
+	--build-arg service=$(NAME) \
 	--build-arg executable=$(executable) \
 	../.. \
 	;)

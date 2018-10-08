@@ -86,7 +86,6 @@ import qualified Codec.MIME.Type              as MIME
 import qualified Codec.MIME.Parse             as MIME
 import qualified Data.ByteString.Char8        as C8
 import qualified Data.ByteString.Lazy         as LBS
--- import qualified Data.Conduit                 as Conduit
 import qualified Data.Conduit.Binary          as Conduit
 import qualified Data.Sequence                as Seq
 import qualified Data.Text                    as Text
@@ -509,7 +508,6 @@ completeResumable r = do
     chunkSource man env s3c b cs = case Seq.viewl cs of
         EmptyL  -> mempty
         c :< cc -> do
-            -- (src, fin) <- lift $ do
             src <- lift $ do
                 let S3ChunkKey ck = mkChunkKey (resumableKey r) (chunkNr c)
                 (_, gor) <- recovering x3 handlers $ const $
@@ -836,4 +834,3 @@ getOtrMetadata cnv ast = do
     let S3AssetKey key = otrKey cnv ast
     (_, r) <- tryS3 . recovering x3 handlers . const $ exec (headObject b key)
     return $ (omUserMetadata <$> horMetadata r) >>= getAmzMetaUser
-

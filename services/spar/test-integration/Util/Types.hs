@@ -21,8 +21,9 @@ module Util.Types
   , teBrig
   , teGalley
   , teSpar
-  , teNewIdp
-  , teMockIdp
+  , teUserId
+  , teTeamId
+  , teIdP
   , teOpts
   , teTstOpts
   , Select
@@ -37,11 +38,12 @@ import Control.Exception
 import Control.Monad
 import Data.Aeson
 import Data.Aeson.TH
+import Data.Id
 import Data.String
 import Data.String.Conversions
 import GHC.Generics (Generic)
 import Lens.Micro.TH
-import SAML2.WebSSO.Config.TH (deriveJSONOptions)
+import SAML2.WebSSO.Types.TH (deriveJSONOptions)
 import Spar.API ()
 import Spar.Options as Options
 import Spar.Types
@@ -54,28 +56,30 @@ type BrigReq   = Request -> Request
 type GalleyReq = Request -> Request
 type SparReq   = Request -> Request
 
+-- | See 'mkEnv' about what's in here.
 data TestEnv = TestEnv
-  { _teMgr     :: Manager
-  , _teCql     :: Cas.ClientState
-  , _teBrig    :: BrigReq
-  , _teGalley  :: GalleyReq
-  , _teSpar    :: SparReq
-  , _teNewIdp  :: NewIdP
-  , _teMockIdp :: Endpoint
-  , _teOpts    :: Opts
-  , _teTstOpts :: IntegrationConfig
+  { _teMgr         :: Manager
+  , _teCql         :: Cas.ClientState
+  , _teBrig        :: BrigReq
+  , _teGalley      :: GalleyReq
+  , _teSpar        :: SparReq
+  , _teOpts        :: Opts               -- ^ spar config
+  , _teTstOpts     :: IntegrationConfig  -- ^ integration test config
+
+    -- user, team, idp details created on spar:
+  , _teUserId      :: UserId             -- ^ owner of the idp's home team
+  , _teTeamId      :: TeamId             -- ^ home team of the idp
+  , _teIdP         :: IdP                -- ^ details of the idp
   }
 
 type Select = TestEnv -> (Request -> Request)
 
-type ResponseLBS = Response (Maybe LBS)
+type ResponseLBS = Bilge.Response (Maybe LBS)
 
 data IntegrationConfig = IntegrationConfig
   { cfgBrig    :: Endpoint
   , cfgGalley  :: Endpoint
   , cfgSpar    :: Endpoint
-  , cfgNewIdp  :: NewIdP
-  , cfgMockIdp :: Endpoint
   } deriving (Show, Generic)
 
 deriveFromJSON deriveJSONOptions ''IntegrationConfig
