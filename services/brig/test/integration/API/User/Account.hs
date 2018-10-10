@@ -40,7 +40,6 @@ import Gundeck.Types.Notification
 import Test.Tasty hiding (Timeout)
 import Test.Tasty.Cannon hiding (Cannon)
 import Test.Tasty.HUnit
-import System.Random (randomIO)
 import Web.Cookie (parseSetCookie)
 import Util as Util
 import Util.AWS as Util
@@ -238,9 +237,11 @@ testCreateUserNoEmailNoPassword brig = do
     put (brig . path "/self/email" . contentJson . zUser uid . zConn "conn" . body setEmail) !!!
         const 202 === statusCode
 
+-- | email address must not be taken on @/register@.
 testCreateUserConflict :: Brig -> Http ()
 testCreateUserConflict brig = do
-    u <- createUser "conflict" "test@simulator.amazonses.com" brig
+    -- trusted email domains
+    u <- createUser "conflict" brig
     let p = RequestBodyLBS . encode $ object
             [ "name"     .= ("conflict1" :: Text)
             , "email"    .= (fromEmail <$> userEmail u) -- dup. email
@@ -250,12 +251,8 @@ testCreateUserConflict brig = do
         const 409 === statusCode
         const (Just "key-exists") === fmap Error.label . decodeBody
 
-    -- Untrusted domain and thus "<anything>@zinfra.io" considered equal
-    -- to "<anything>+<uuid>@zinfra.io"
-    -- NOTE: local part cannot be longer than 64 octets
-    rd <- liftIO (randomIO :: IO Integer)
-    let email = (T.pack $ show rd) <> "@zinfra.io"
-    u2 <- createUser "conflict" email brig
+    -- untrusted email domains
+    u2 <- createUserUntrustedEmail "conflict" brig
     let Just (Email loc dom) = userEmail u2
     let p2 = RequestBodyLBS . encode $ object
             [ "name"     .= ("conflict2" :: Text)
@@ -283,7 +280,7 @@ testCreateUserBlacklist brig aws =
     mapM_ ensureBlacklist ["bounce", "complaint"]
   where
     ensureBlacklist typ = do
-        e <- mkSimulatorEmail typ
+        e <- randomEmail
         flip finally (removeBlacklist brig e) $ do
             post (brig . path "/register" . contentJson . body (p e)) !!! const 201 === statusCode
             -- If we are using a local env, we need to fake this bounce
@@ -338,7 +335,7 @@ testCreateUserExternalSSO brig = do
 
 testActivateWithExpiry :: Brig -> Opt.Timeout -> Http ()
 testActivateWithExpiry brig timeout = do
-    u <- decodeBody =<< registerUser "dilbert" "success@simulator.amazonses.com" brig
+    u <- decodeBody =<< registerUser "dilbert" brig
     let email = fromMaybe (error "missing email") (userEmail u)
     act <- getActivationCode brig (Left email)
     case act of
@@ -515,7 +512,7 @@ testEmailUpdate brig aws = do
     initiateEmailUpdate brig eml uid !!! const 204 === statusCode
 
     -- ensure no other user has "test+<uuid>@example.com"
-    -- if there is such a user, let's delete it first otherwise
+    -- if there is such a user, let's delete it first.  otherwise
     -- this test fails since there can be only one user with "test+...@example.com"
     ensureNoOtherUserWithEmail (Email "test" "example.com")
 
@@ -718,7 +715,7 @@ testSendActivationCode brig = do
     -- Code for email pre-verification
     requestActivationCode brig . Left =<< randomEmail
     -- Standard email registration flow
-    r <- registerUser "Alice" "success@simulator.amazonses.com" brig <!! const 201 === statusCode
+    r <- registerUser "Alice" brig <!! const 201 === statusCode
     let Just email = userEmail =<< decodeBody r
     -- Re-request existing activation code
     requestActivationCode brig (Left email)
@@ -926,13 +923,7 @@ testUpdateSSOId brig = do
         mkUser :: Bool -> Bool -> Http User
         mkUser hasEmail hasPhone = do
             name <- UUID.toText <$> liftIO UUID.nextRandom
-            let email = if hasEmail
-                     then Just "success@simulator.amazonses.com"
-                     else Nothing
-            phone <- if hasPhone
-                     then Just . fromPhone <$> randomPhone
-                     else pure Nothing
-            resp <- postUser name email phone Nothing Nothing brig <!!
+            resp <- postUser name hasEmail hasPhone Nothing Nothing brig <!!
                       const 201 === statusCode
             decodeBody resp
 
