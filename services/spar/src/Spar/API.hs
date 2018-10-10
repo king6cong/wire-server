@@ -125,8 +125,8 @@ initializeBindCookie zusr authreqttl = do
     pure (path, domain)
   secret <- liftIO $ cs . ES.encode <$> randBytes 32
   let msecret = if isJust zusr then Just secret else Nothing
-      cky = case SAML.toggleCookie path $ (, authreqttl) <$> msecret :: BindCookie of
-              SAML.SimpleSetCookie raw -> SAML.SimpleSetCookie raw { Cky.setCookieDomain = Just domain }
+  cky <- (SAML.toggleCookie path $ (, authreqttl) <$> msecret :: Spar BindCookie)
+         <&> \(SAML.SimpleSetCookie raw) -> SAML.SimpleSetCookie raw { Cky.setCookieDomain = Just domain }
   forM_ zusr $ \userid -> wrapMonadClientWithEnv $ Data.insertBindCookie cky userid authreqttl
   pure cky
 
